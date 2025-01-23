@@ -1,6 +1,40 @@
 [package]
-name = "pinbrd"
+name = "pinlab"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+members = ["egui_graphs"]
+
 [dependencies]
+# wayland support is not enjoyable
+eframe = { version = "0.30", features = [
+  "default_fonts",
+  "persistence",
+  "x11",
+  "glow",
+], default-features = false }
+egui = { version = "0.30", features = ["persistence"] }
+egui_graphs = { path = "./egui_graphs", version = "0.22", features = [
+  "events",
+] }
+egui-modal = "0.6"
+petgraph = { version = "0.7", features = ["stable_graph", "serde-1"] }
+open = "5.3"
+serde = "1"
+uuid = { version = "1.12", features = ["serde", "v4"] }
+rfd = "0.15"
+serde_json = "1"
+typetag = "0.2"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+lazy_async_promise = "0.6"
+crossbeam = "0.8"
+egui_commonmark = { version = "0.19", features = [
+  "better_syntax_highlighting",
+  "svg",
+  "fetch",
+] }
+egui_extras = "0.30"
+tokio-shutdown = "0.1"
+notify = "8"

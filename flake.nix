@@ -27,19 +27,37 @@
           overlays = [ rust-overlay.overlays.default ];
         };
       pkgSet = system: {
-        pinbrd =
+        pinlab =
           with (pkgsWithRust system);
           (makeRustPlatform {
             cargo = rust-bin.stable.latest.default;
             rustc = rust-bin.stable.latest.default;
           }).buildRustPackage
-            {
-              name = "pinbrd";
+            rec {
+              name = "pinlab";
               version = "git";
               src = lib.cleanSource ./.;
               cargoLock = {
                 lockFile = ./Cargo.lock;
               };
+              postFixup = ''
+                patchelf $out/bin/${name} \
+                  --add-rpath ${
+                    lib.makeLibraryPath [
+                      libGL
+                      libxkbcommon
+                      wayland
+                    ]
+                  }
+              '';
+              buildInputs = [
+                libxkbcommon
+                wayland
+                libGL
+                xorg.libXcursor
+                xorg.libXi
+                xorg.libX11
+              ];
             };
       };
     in
@@ -61,10 +79,10 @@
         };
 
         apps = rec {
-          default = pinbrd;
-          pinbrd = (
+          default = pinlab;
+          pinlab = (
             utils.lib.mkApp {
-              drv = packages."pinbrd";
+              drv = packages."pinlab";
             }
           );
         };
@@ -75,7 +93,7 @@
             inherit (self.checks.${system}.pre-commit-check) shellHook;
             nativeBuildInputs = [
               # # write rustfmt first to ensure we are using nightly rustfmt
-              # rust-bin.nightly."2025-01-01".rustfmt
+              rust-bin.nightly."2025-01-01".rustfmt
               rust-bin.stable.latest.default
               rust-bin.stable.latest.rust-src
               rust-analyzer
@@ -84,11 +102,21 @@
               cargo-cache
               cargo-outdated
             ];
+            LD_LIBRARY_PATH =
+              with pkgs;
+              lib.makeLibraryPath [
+                libGL
+                libxkbcommon
+                wayland
+                xorg.libXcursor
+                xorg.libXi
+                xorg.libX11
+              ];
           };
       })
     // {
       overlays.default = final: prev: {
-        pinbrd = recurseIntoAttrs (pkgSet prev.pkgs.system);
+        pinlab = recurseIntoAttrs (pkgSet prev.pkgs.system);
       };
     };
 }
