@@ -32,8 +32,13 @@ impl Blob {
 /// Relation between nodes
 #[derive(Serialize, Deserialize, Clone)]
 pub enum Relation {
+    /// Contradicting or confusing
     Conflict,
+    /// Partial progress towards understanding
+    Progress,
+    /// Non-trivial and interesting relation
     Insight,
+    /// Easy to identify or probably trivial relation
     Related,
 }
 
@@ -41,6 +46,7 @@ impl Relation {
     pub fn color(&self) -> Option<Color32> {
         match self {
             Self::Conflict => Some(Color32::LIGHT_RED),
+            Self::Progress => Some(Color32::YELLOW),
             Self::Insight => Some(Color32::LIGHT_GREEN),
             // Color should be determined by foregrapund default
             Self::Related => None,
@@ -50,6 +56,7 @@ impl Relation {
     pub fn label(&self) -> String {
         match self {
             Relation::Conflict => "Conflict",
+            Relation::Progress => "Progress",
             Relation::Insight => "Insight",
             Relation::Related => "Related",
         }
@@ -113,7 +120,7 @@ impl From<EdgeProps<Conn>> for MyEdgeShape {
     fn from(edge: EdgeProps<Conn>) -> Self {
         let color = edge.payload.relation.color();
         let mut super_shape = DefaultEdgeShape::from(edge);
-        super_shape.color = dbg!(color);
+        super_shape.color = color;
         Self { super_shape }
     }
 }

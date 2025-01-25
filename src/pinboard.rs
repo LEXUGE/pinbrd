@@ -299,7 +299,7 @@ impl PinboardBuffer {
                         if self.pinboard.graph.g().find_edge(a, b).is_none() {
                             ui.menu_button("Connect with", |ui| {
                                 let selected = Vec::from(self.pinboard.graph.selected_nodes());
-                                let mut relation = Relation::Insight;
+                                let mut relation = Relation::Related;
                                 let mut clicked = false;
                                 if ui.button("Related").clicked() {
                                     relation = Relation::Related;
@@ -307,6 +307,12 @@ impl PinboardBuffer {
                                     ui.close_menu();
                                 }
                                 if ui.button("Insight").clicked() {
+                                    relation = Relation::Insight;
+                                    clicked = true;
+                                    ui.close_menu();
+                                }
+                                if ui.button("Progress").clicked() {
+                                    relation = Relation::Progress;
                                     clicked = true;
                                     ui.close_menu();
                                 }
@@ -333,8 +339,8 @@ impl PinboardBuffer {
                     }
 
                     if self.pinboard.graph.selected_edges().len() == 1 {
+                        let id = self.pinboard.graph.selected_edges()[0];
                         if ui.button("Add to the Edge").clicked() {
-                            let id = self.pinboard.graph.selected_edges()[0];
                             self.add_blob_to_edge_promise =
                                 Some(Promise::spawn_async(async move {
                                     (
@@ -346,6 +352,37 @@ impl PinboardBuffer {
                                 }));
                             ui.close_menu();
                         }
+
+                        ui.menu_button("Change Relation", |ui| {
+                            let mut relation = Relation::Related;
+                            let mut clicked = false;
+                            if ui.button("Related").clicked() {
+                                relation = Relation::Related;
+                                clicked = true;
+                                ui.close_menu();
+                            }
+                            if ui.button("Insight").clicked() {
+                                relation = Relation::Insight;
+                                clicked = true;
+                                ui.close_menu();
+                            }
+                            if ui.button("Progress").clicked() {
+                                relation = Relation::Progress;
+                                clicked = true;
+                                ui.close_menu();
+                            }
+                            if ui.button("Conflict").clicked() {
+                                relation = Relation::Conflict;
+                                clicked = true;
+                                ui.close_menu();
+                            }
+                            if clicked {
+                                let edge = self.pinboard.graph.edge_mut(id).unwrap();
+                                edge.set_label(relation.label());
+                                edge.payload_mut().relation = relation;
+                                self.unsaved = true;
+                            }
+                        });
                     }
 
                     if self.pinboard.graph.selected_edges().len() > 0 {
