@@ -1,39 +1,40 @@
+use anyhow::anyhow;
+use clap::Parser;
 use eframe::{run_native, App, CreationContext, NativeOptions};
 use egui::{Context, TopBottomPanel};
 use graph::{Blob, PinboardGraph};
-use lazy_async_promise::{
-    BoxedSendError, DirectCacheAccess, ImmediateValuePromise, ImmediateValueState,
-};
 use petgraph::stable_graph::StableGraph;
-use previewer::MarkdownPreviwer;
+use pinboard::*;
+use poll_promise::Promise;
 use rfd::FileDialog;
 use std::{collections::HashMap, path::PathBuf};
-use tokio_shutdown::Shutdown;
 use uuid::Uuid;
 
 mod graph;
 mod pinboard;
-mod previewer;
-
-use pinboard::*;
 
 pub struct PinlabApp {
     // Each pinboard is identified with an UUID, no matter it's saved or not. When saving, the uuid
     // will be stored into the pinboard file.
     // NOTE: The bool represents if the pinboard window is open
     pinboards: HashMap<Uuid, (PinboardBuffer, bool)>,
-    previewer: MarkdownPreviwer,
 
-    boards_to_open: Vec<Option<ImmediateValuePromise<Option<PinboardBuffer>>>>,
+    boards_to_open: Vec<Option<Promise<anyhow::Result<PinboardBuffer>>>>,
+
+    nvim_ext: Vec<String>,
+    nvim_srv: Option<String>,
 }
 
 impl PinlabApp {
-    fn new(cc: &CreationContext<'_>, _shutdown: Shutdown) -> Self {
-        cc.egui_ctx.set_theme(egui::Theme::Light);
+    fn new(cc: &CreationContext<'_>, args: Args) -> Self {
+        cc.egui_ctx.set_theme(egui::Theme::Dark);
         Self {
             pinboards: HashMap::new(),
-            previewer: MarkdownPreviwer::new(),
             boards_to_open: Vec::default(),
+            nvim_srv: args.nvim_srv,
+            nvim_ext: args
+                .nvim_ext
+                .unwrap_or(vec!["md".into(), "markdown".into()]),
         }
     }
 
@@ -50,14 +51,14 @@ impl PinlabApp {
             .insert(*pinboard.pinboard.get_uuid(), (pinboard, true));
     }
 
-    async fn open_pinboard() -> anyhow::Result<Option<PinboardBuffer>> {
+    async fn open_pinboard() -> anyhow::Result<PinboardBuffer> {
         if let Some(path) = FileDialog::new()
             .add_filter("Pinboard", &["pinbrd"])
             .pick_file()
         {
-            return Ok(Some(Self::open_pinboard_from_path(&path).await?));
+            return Ok(Self::open_pinboard_from_path(&path).await?);
         }
-        Ok(None)
+        Err(anyhow!("user canceled opening"))
     }
 
     async fn open_pinboard_from_path(path: &PathBuf) -> anyhow::Result<PinboardBuffer> {
@@ -81,7 +82,7 @@ impl PinlabApp {
 
                     if ui.button("Open...").clicked() {
                         self.boards_to_open
-                            .push(Some(new_promise(Self::open_pinboard())));
+                            .push(Some(Promise::spawn_async(Self::open_pinboard())));
                         ui.close_menu();
                     }
                 });
@@ -91,29 +92,26 @@ impl PinlabApp {
 }
 
 fn handle_promise<T: Send + 'static, R>(
-    promise: &mut Option<ImmediateValuePromise<T>>,
-    handler: impl FnOnce(Result<T, BoxedSendError>) -> R,
+    p: &mut Option<Promise<T>>,
+    f: impl FnOnce(&T) -> R,
 ) -> Option<R> {
-    if let Some(state) = promise {
-        let res = state.poll_state_mut().take_result().map(handler);
-        match state.poll_state() {
-            ImmediateValueState::Updating => {}
-            _ => *promise = None,
+    // workaround to the borrow checker
+    let mut flag = false;
+    let res = if let Some(promise) = p {
+        match promise.ready() {
+            Some(t) => {
+                flag = true;
+                Some(f(t))
+            }
+            None => None,
         }
-        res
     } else {
         None
+    };
+    if flag {
+        *p = None;
     }
-}
-
-// Helper function
-fn new_promise<
-    U: std::future::Future<Output = anyhow::Result<T>> + Send + 'static,
-    T: Send + 'static,
->(
-    updater: U,
-) -> ImmediateValuePromise<T> {
-    ImmediateValuePromise::new(async { updater.await.map_err(|e| BoxedSendError(Box::from(e))) })
+    return res;
 }
 
 impl App for PinlabApp {
@@ -122,46 +120,78 @@ impl App for PinlabApp {
 
         for (p, open) in self.pinboards.values_mut() {
             if let Some(b) = p.show(ctx, open) {
-                async fn _h(path: PathBuf) -> anyhow::Result<Option<PinboardBuffer>> {
-                    return Ok(Some(PinlabApp::open_pinboard_from_path(&path).await?));
+                async fn _h(path: PathBuf) -> anyhow::Result<PinboardBuffer> {
+                    PinlabApp::open_pinboard_from_path(&path).await
                 }
                 match b {
-                    Blob::URI(uri) => open::that(uri).unwrap(),
                     Blob::File(path) => {
-                        if Some("md") == path.extension().map(|s| s.to_str()).flatten() {
-                            self.previewer.append(path);
+                        match if let Some(srv) = &self.nvim_srv {
+                            // If matches any of the extension we want to launch in neovim
+                            if Some(true)
+                                == path
+                                    .extension()
+                                    .map(|s| s.to_str())
+                                    .flatten()
+                                    .map(|ext| self.nvim_ext.iter().any(|e| e.as_str() == ext))
+                            {
+                                std::process::Command::new("nvim")
+                                    .arg("--server")
+                                    .arg(srv)
+                                    .arg("--remote")
+                                    .arg(path)
+                                    .spawn()
+                                    .map(|_| ())
+                            } else {
+                                // if not matched, open in default as well
+                                open::that(path)
+                            }
                         } else {
-                            open::that(path).unwrap()
+                            open::that(path)
+                        } {
+                            // print out error if any
+                            Err(e) => eprintln!("{}", e),
+                            _ => {}
                         }
                     }
-                    Blob::PinboardGraph(path) => {
-                        self.boards_to_open.push(Some(new_promise(_h(path))))
-                    }
+                    Blob::PinboardGraph(path) => self
+                        .boards_to_open
+                        .push(Some(Promise::spawn_async(_h(path)))),
                 }
             }
         }
 
         // Handle board opening
-        for p in &mut self.boards_to_open {
-            handle_promise(p, |r| match r {
-                Ok(Some(buf)) => {
-                    if let Some(p) = self.pinboards.get_mut(&buf.pinboard.get_uuid()) {
-                        p.1 = true;
-                    } else {
-                        self.pinboards.insert(*buf.pinboard.get_uuid(), (buf, true));
+        // WARN: we need to do some terrible workaround...
+        let mut indices_to_remove = Vec::with_capacity(self.boards_to_open.len());
+        for (i, p) in self.boards_to_open.iter_mut().enumerate() {
+            if let Some(promise) = p {
+                match promise.ready() {
+                    Some(Ok(_)) => indices_to_remove.push(i),
+                    Some(Err(e)) => {
+                        eprintln!("{}", e);
+                        *p = None;
                     }
+                    None => {}
                 }
-                Err(_e) => eprintln!("Failed to open pinboard"),
-                _ => {}
-            });
+            }
+        }
+
+        // We have already removed these indices so we wouldn't need to replace them with None
+        for i in indices_to_remove {
+            let buf = self
+                .boards_to_open
+                .remove(i)
+                .unwrap()
+                .try_take()
+                .unwrap_or_else(|_| panic!("this shouldn't happened!"))
+                .unwrap();
+            if let Some(p) = self.pinboards.get_mut(&buf.pinboard.get_uuid()) {
+                p.1 = true;
+            } else {
+                self.pinboards.insert(*buf.pinboard.get_uuid(), (buf, true));
+            }
         }
         self.boards_to_open.retain(Option::is_some);
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical()
-                .auto_shrink(false)
-                .show(ui, |ui| self.previewer.show(ui));
-        });
     }
 
     // fn save(&mut self, storage: &mut dyn Storage) {
@@ -169,13 +199,26 @@ impl App for PinlabApp {
     // }
 }
 
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// neovim server address. If not provided, then all files will be opened via default apps.
+    #[arg(short, long)]
+    nvim_srv: Option<String>,
+
+    /// types of files to launch in neovim remotely
+    #[arg(short, long)]
+    nvim_ext: Option<Vec<String>>,
+}
+
 #[tokio::main]
 async fn main() {
-    let shutdown = Shutdown::new().unwrap();
+    let args = Args::parse();
+
     run_native(
         "Pinlab",
         NativeOptions::default(),
-        Box::new(|cc| Ok(Box::new(PinlabApp::new(cc, shutdown)))),
+        Box::new(|cc| Ok(Box::new(PinlabApp::new(cc, args)))),
     )
     .unwrap();
 }

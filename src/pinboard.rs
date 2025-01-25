@@ -1,12 +1,13 @@
 use crate::{
     graph::{Blob, Conn, PinboardGraph, PinboardGraphView, Relation},
-    handle_promise, new_promise,
+    handle_promise,
 };
+use anyhow::{anyhow, Result};
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use egui::{Button, Context, Id, Key, KeyboardShortcut, Modal, Modifiers, Pos2, Ui, Window};
 use egui_graphs::{events::Event, Metadata, SettingsInteraction, SettingsNavigation};
-use lazy_async_promise::ImmediateValuePromise;
-use petgraph::{graph::NodeIndex, stable_graph::StableGraph};
+use petgraph::{graph::NodeIndex, prelude::EdgeIndex, stable_graph::StableGraph};
+use poll_promise::Promise;
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -60,14 +61,11 @@ pub struct PinboardBuffer {
 
     // UI related states
     show_rename_modal: bool,
-    show_add_url_node_modal: bool,
-    temp: String,
-    context_menu_cursor_pos: Option<Pos2>,
 
     // Promises
-    save_file_promise: Option<ImmediateValuePromise<Option<PathBuf>>>,
-    add_file_node_promise: Option<ImmediateValuePromise<(Option<Pos2>, Option<PathBuf>)>>,
-    add_pinboard_node_promise: Option<ImmediateValuePromise<(Option<Pos2>, Option<PathBuf>)>>,
+    save_file_promise: Option<Promise<Result<PathBuf>>>,
+    add_node_promise: Option<Promise<(Option<Pos2>, Result<PathBuf>)>>,
+    add_blob_to_edge_promise: Option<Promise<(EdgeIndex, Result<PathBuf>)>>,
 }
 
 impl Default for PinboardBuffer {
@@ -79,12 +77,9 @@ impl Default for PinboardBuffer {
             event_publisher,
             event_receiver,
             show_rename_modal: false,
-            show_add_url_node_modal: false,
-            temp: String::default(),
-            context_menu_cursor_pos: None,
             save_file_promise: None,
-            add_file_node_promise: None,
-            add_pinboard_node_promise: None,
+            add_node_promise: None,
+            add_blob_to_edge_promise: None,
             unsaved: false,
         }
     }
@@ -99,27 +94,30 @@ impl PinboardBuffer {
             ..Default::default()
         }
     }
-    async fn save_as(pinboard: Pinboard) -> anyhow::Result<Option<PathBuf>> {
+    async fn save_as(pinboard: Pinboard) -> anyhow::Result<PathBuf> {
         if let Some(path) = FileDialog::new()
             .add_filter("Pinboard", &["pinbrd"])
             .save_file()
         {
             Self::save_to_path(pinboard, path).await
         } else {
-            Ok(None)
+            Err(anyhow::anyhow!(
+                "user didn't select path to save pinboard {}",
+                pinboard.title
+            ))
         }
     }
 
-    async fn save_to_path(pinboard: Pinboard, path: PathBuf) -> anyhow::Result<Option<PathBuf>> {
+    async fn save_to_path(pinboard: Pinboard, path: PathBuf) -> anyhow::Result<PathBuf> {
         let content = serde_json::to_string(&pinboard)?;
         tokio::fs::write(&path, &content).await?;
-        Ok(Some(path))
+        Ok(path)
     }
 
     fn save(&mut self) {
         let path = self.path.clone();
         let pinboard = self.pinboard.clone();
-        self.save_file_promise = Some(new_promise(async {
+        self.save_file_promise = Some(Promise::spawn_async(async {
             if let Some(path) = path {
                 Self::save_to_path(pinboard, path).await
             } else {
@@ -138,40 +136,7 @@ impl PinboardBuffer {
 
                     if ui.button("Done").clicked() {
                         self.show_rename_modal = false;
-                    }
-                })
-            });
-        }
-    }
-
-    fn show_add_url_node_dialog(&mut self, ui: &Ui, metadata: &Metadata) {
-        if self.show_add_url_node_modal {
-            Modal::new(ui.next_auto_id()).show(ui.ctx(), |ui| {
-                let esc = ui.input_mut(|i| {
-                    i.consume_shortcut(&KeyboardShortcut::new(Modifiers::NONE, Key::Escape))
-                });
-                ui.label("Enter URL:");
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    ui.text_edit_singleline(&mut self.temp);
-
-                    if ui.button("Cancel").clicked() || esc {
-                        self.temp = String::default();
-                        self.show_add_url_node_modal = false;
-                    }
-                    if ui.button("Done").clicked() {
-                        let n = Blob::URI(self.temp.clone());
-                        if let Some(pos) = self.context_menu_cursor_pos {
-                            self.pinboard.graph.add_node_with_location(
-                                n,
-                                metadata.screen_to_canvas_pos(dbg!(pos)),
-                            );
-                        } else {
-                            self.pinboard.graph.add_node(n);
-                        }
                         self.unsaved = true;
-                        self.temp = String::default();
-                        self.show_add_url_node_modal = false;
                     }
                 })
             });
@@ -182,6 +147,16 @@ impl PinboardBuffer {
         let mut res = None;
         for e in self.event_receiver.try_iter() {
             match e {
+                Event::EdgeDoubleClick(payload) => {
+                    let edge_id = EdgeIndex::new(payload.id);
+
+                    res = self
+                        .pinboard
+                        .graph
+                        .edge(edge_id)
+                        .map(|e| e.payload().comment.clone())
+                        .flatten();
+                }
                 Event::NodeDoubleClick(payload) => {
                     let node_id = NodeIndex::new(payload.id);
 
@@ -202,8 +177,10 @@ impl PinboardBuffer {
     pub fn show(&mut self, ctx: &Context, open: &mut bool) -> Option<Blob> {
         let mut metadata = Metadata::default();
         let id = Id::new(self.pinboard.uuid);
+        // keyboard shortcuts
         let save_shortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::S);
         let rename_shortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F2);
+        let add_node_shortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::N);
         let title = format!(
             "{}{}",
             self.pinboard.title.as_str(),
@@ -215,14 +192,6 @@ impl PinboardBuffer {
             .id(id)
             .open(open)
             .show(ctx, |ui| {
-                // Process keyboard shortcuts
-                if ui.input_mut(|i| i.consume_shortcut(&save_shortcut)) {
-                    self.save()
-                }
-                if ui.input_mut(|i| i.consume_shortcut(&rename_shortcut)) {
-                    self.show_rename_modal = true;
-                }
-
                 egui::menu::bar(ui, |ui| {
                     ui.menu_button("File", |ui| {
                         if ui
@@ -251,7 +220,7 @@ impl PinboardBuffer {
                     }
                 });
                 ui.separator();
-                ui.add(
+                let resp = ui.add(
                     // We cannot save graphview because it borrows the underlying graph. And we
                     // cannot do self-referential struct...
                     &mut PinboardGraphView::new(&mut self.pinboard.graph, id)
@@ -270,39 +239,46 @@ impl PinboardBuffer {
                                 .with_fit_to_screen_enabled(false),
                         )
                         .with_events(&self.event_publisher),
-                )
-                .context_menu(|ui| {
+                );
+
+                if resp.hovered() {
+                    // Process keyboard shortcuts
+                    if ui.input_mut(|i| i.consume_shortcut(&save_shortcut)) {
+                        self.save();
+                    }
+                    if ui.input_mut(|i| i.consume_shortcut(&rename_shortcut)) {
+                        self.show_rename_modal = true;
+                    }
+                    if ui.input_mut(|i| i.consume_shortcut(&add_node_shortcut)) {
+                        let pos = ui.input(|i| i.pointer.hover_pos());
+                        self.add_node_promise = Some(Promise::spawn_async(async move {
+                            (
+                                pos,
+                                FileDialog::new()
+                                    .pick_file()
+                                    .ok_or(anyhow!("user didn't select file to add node")),
+                            )
+                        }));
+                    }
+                }
+
+                resp.context_menu(|ui| {
                     // Position when user interacted in the context menu, this value should be
                     // saved for the use of node addition later, either passing through closure.
                     let pos = ui.input(|i| i.pointer.interact_pos());
                     // TODO: These should spun up a property sidepanel and ask user to put their
                     // stuff there
-                    ui.menu_button("Add node", |ui| {
-                        if ui.button("File").clicked() {
-                            self.add_file_node_promise = Some(new_promise(async move {
-                                Ok((pos, FileDialog::new().pick_file()))
-                            }));
-                            ui.close_menu();
-                        }
-
-                        if ui.button("URL").clicked() {
-                            self.show_add_url_node_modal = true;
-                            self.context_menu_cursor_pos = pos;
-                            ui.close_menu();
-                        }
-
-                        if ui.button("Pinboard").clicked() {
-                            self.add_pinboard_node_promise = Some(new_promise(async move {
-                                Ok((
-                                    pos,
-                                    FileDialog::new()
-                                        .add_filter("Pinboard", &["pinbrd"])
-                                        .pick_file(),
-                                ))
-                            }));
-                            ui.close_menu();
-                        }
-                    });
+                    if ui.button("Add node").clicked() {
+                        self.add_node_promise = Some(Promise::spawn_async(async move {
+                            (
+                                pos,
+                                FileDialog::new()
+                                    .pick_file()
+                                    .ok_or(anyhow!("user didn't select file to add node")),
+                            )
+                        }));
+                        ui.close_menu();
+                    }
 
                     // Display context menu based on what we have selected
                     if self.pinboard.graph.selected_nodes().len() > 0 {
@@ -317,33 +293,59 @@ impl PinboardBuffer {
                     }
 
                     // If we have two nodes selected, offer an option to connect them by edge
-                    // TODO: We should allow at most one edge between two nodes
                     if self.pinboard.graph.selected_nodes().len() == 2 {
-                        ui.menu_button("Connect with", |ui| {
-                            let selected = Vec::from(self.pinboard.graph.selected_nodes());
-                            let mut relation = Relation::Insight;
-                            let mut clicked = false;
-                            if ui.button("Insight").clicked() {
-                                clicked = true;
-                                ui.close_menu();
-                            }
-                            if ui.button("Conflict").clicked() {
-                                relation = Relation::Conflict;
-                                clicked = true;
-                                ui.close_menu();
-                            }
-                            if clicked {
-                                self.pinboard.graph.add_edge(
-                                    selected[0],
-                                    selected[1],
-                                    Conn {
-                                        comment: None,
-                                        relation,
-                                    },
-                                );
-                                self.unsaved = true;
-                            }
-                        });
+                        let a = self.pinboard.graph.selected_nodes()[0];
+                        let b = self.pinboard.graph.selected_nodes()[1];
+                        if self.pinboard.graph.g().find_edge(a, b).is_none() {
+                            ui.menu_button("Connect with", |ui| {
+                                let selected = Vec::from(self.pinboard.graph.selected_nodes());
+                                let mut relation = Relation::Insight;
+                                let mut clicked = false;
+                                if ui.button("Related").clicked() {
+                                    relation = Relation::Related;
+                                    clicked = true;
+                                    ui.close_menu();
+                                }
+                                if ui.button("Insight").clicked() {
+                                    clicked = true;
+                                    ui.close_menu();
+                                }
+                                if ui.button("Conflict").clicked() {
+                                    relation = Relation::Conflict;
+                                    clicked = true;
+                                    ui.close_menu();
+                                }
+                                if clicked {
+                                    let label = relation.label();
+                                    self.pinboard.graph.add_edge_with_label(
+                                        selected[0],
+                                        selected[1],
+                                        Conn {
+                                            comment: None,
+                                            relation,
+                                        },
+                                        label,
+                                    );
+                                    self.unsaved = true;
+                                }
+                            });
+                        }
+                    }
+
+                    if self.pinboard.graph.selected_edges().len() == 1 {
+                        if ui.button("Add to the Edge").clicked() {
+                            let id = self.pinboard.graph.selected_edges()[0];
+                            self.add_blob_to_edge_promise =
+                                Some(Promise::spawn_async(async move {
+                                    (
+                                        id,
+                                        FileDialog::new().pick_file().ok_or(anyhow!(
+                                            "user didn't select file to add to edge"
+                                        )),
+                                    )
+                                }));
+                            ui.close_menu();
+                        }
                     }
 
                     if self.pinboard.graph.selected_edges().len() > 0 {
@@ -362,53 +364,52 @@ impl PinboardBuffer {
                 metadata = Metadata::load(ui, id);
 
                 self.show_rename_dialog(ui);
-                self.show_add_url_node_dialog(ui, &metadata);
             });
 
         // Handle Promises
         handle_promise(&mut self.save_file_promise, |r| match r {
-            Ok(Some(path)) => {
-                self.path = Some(path);
+            Ok(p) => {
+                self.path = Some(p.to_path_buf());
                 self.unsaved = false;
             }
-            Ok(None) => {}
-            Err(_e) => eprintln!("Failed to save pinboard"),
-        });
-
-        handle_promise(&mut self.add_file_node_promise, |r| {
-            let (press_pos, p) = r.unwrap_or((None, None));
-            if let Some(path) = p {
-                let n = Blob::File(path.to_str().unwrap().into());
-                let filename = path.file_name().unwrap().to_str().unwrap().to_string();
-                if let Some(pos) = press_pos {
-                    self.pinboard.graph.add_node_with_label_and_location(
-                        n,
-                        filename,
-                        metadata.screen_to_canvas_pos(pos),
-                    );
-                } else {
-                    self.pinboard.graph.add_node_with_label(n, filename);
-                }
-                self.unsaved = true;
+            Err(e) => {
+                eprintln!("{}", e);
             }
         });
 
-        handle_promise(&mut self.add_pinboard_node_promise, |r| {
-            let (press_pos, p) = r.unwrap_or((None, None));
-            if let Some(path) = p {
-                let n = Blob::PinboardGraph(path.to_str().unwrap().into());
+        handle_promise(&mut self.add_node_promise, |(press_pos, p)| match p {
+            Ok(path) => {
                 let filename = path.file_name().unwrap().to_str().unwrap().to_string();
+                let blob = match path.extension().map(|s| s.to_str()).flatten() {
+                    Some("pinbrd") => Blob::PinboardGraph(path.to_path_buf()),
+                    _ => Blob::File(path.to_path_buf()),
+                };
                 if let Some(pos) = press_pos {
                     self.pinboard.graph.add_node_with_label_and_location(
-                        n,
+                        blob,
                         filename,
-                        metadata.screen_to_canvas_pos(pos),
+                        metadata.screen_to_canvas_pos(*pos),
                     );
                 } else {
-                    self.pinboard.graph.add_node_with_label(n, filename);
+                    self.pinboard.graph.add_node_with_label(blob, filename);
                 }
                 self.unsaved = true;
             }
+            Err(e) => eprintln!("{}", e),
+        });
+
+        handle_promise(&mut self.add_blob_to_edge_promise, |(id, p)| match p {
+            Ok(path) => {
+                let blob = match path.extension().map(|s| s.to_str()).flatten() {
+                    Some("pinbrd") => Blob::PinboardGraph(path.to_path_buf()),
+                    _ => Blob::File(path.to_path_buf()),
+                };
+                if let Some(edge) = self.pinboard.graph.edge_mut(*id) {
+                    edge.payload_mut().comment = Some(blob);
+                    self.unsaved = true;
+                }
+            }
+            Err(e) => eprintln!("{}", e),
         });
 
         self.handle_events()

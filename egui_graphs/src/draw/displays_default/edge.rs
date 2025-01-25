@@ -22,6 +22,7 @@ pub struct DefaultEdgeShape {
     pub curve_size: f32,
     pub loop_size: f32,
     pub label_text: String,
+    pub color: Option<Color32>,
 }
 
 impl<E: Clone> From<EdgeProps<E>> for DefaultEdgeShape {
@@ -36,6 +37,7 @@ impl<E: Clone> From<EdgeProps<E>> for DefaultEdgeShape {
             tip_angle: std::f32::consts::TAU / 30.,
             curve_size: 20.,
             loop_size: 3.,
+            color: None,
         }
     }
 }
@@ -80,7 +82,7 @@ impl<N: Clone, E: Clone, Ty: EdgeType, Ix: IndexType, D: DisplayNode<N, E, Ty, I
             ctx.ctx.style().visuals.widgets.inactive
         };
         let color = style.fg_stroke.color;
-        let stroke = Stroke::new(self.width, color);
+        let stroke = Stroke::new(self.width, if let Some(c) = self.color { c } else { color });
 
         if start.id() == end.id() {
             // draw loop

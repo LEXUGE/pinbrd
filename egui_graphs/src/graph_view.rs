@@ -32,9 +32,9 @@ pub type DefaultGraphView<'a> = GraphView<
 
 #[cfg(feature = "events")]
 use crate::events::{
-    Event, PayloadEdgeClick, PayloadEdgeDeselect, PayloadEdgeSelect, PayloadNodeClick,
-    PayloadNodeDeselect, PayloadNodeDoubleClick, PayloadNodeDragEnd, PayloadNodeDragStart,
-    PayloadNodeMove, PayloadNodeSelect, PayloadPan, PayloadZoom,
+    Event, PayloadEdgeClick, PayloadEdgeDeselect, PayloadEdgeDoubleClick, PayloadEdgeSelect,
+    PayloadNodeClick, PayloadNodeDeselect, PayloadNodeDoubleClick, PayloadNodeDragEnd,
+    PayloadNodeDragStart, PayloadNodeMove, PayloadNodeSelect, PayloadPan, PayloadZoom,
 };
 #[cfg(feature = "events")]
 use crossbeam::channel::Sender;
@@ -310,7 +310,21 @@ where
         }
 
         if let Some(edge_idx) = found_edge {
+            if resp.double_clicked() {
+                self.handle_edge_double_click(edge_idx);
+                return;
+            }
             self.handle_edge_click(edge_idx);
+        }
+    }
+
+    fn handle_edge_double_click(&mut self, idx: EdgeIndex<Ix>) {
+        if !self.settings_interaction.node_clicking_enabled {
+            return;
+        }
+
+        if self.settings_interaction.node_clicking_enabled {
+            self.set_edge_double_clicked(idx);
         }
     }
 
@@ -405,7 +419,12 @@ where
         {
             let n_idx_dragged = self.g.dragged_node().unwrap();
             let delta_in_graph_coords = resp.drag_delta() / meta.zoom;
-            self.move_node(n_idx_dragged, delta_in_graph_coords);
+            for id in self.g.selected_nodes().to_vec() {
+                self.move_node(id, delta_in_graph_coords);
+            }
+            if !self.g.selected_nodes().contains(&n_idx_dragged) {
+                self.move_node(n_idx_dragged, delta_in_graph_coords);
+            }
         }
 
         // compensate movement of the node which is not caused by dragging
@@ -415,7 +434,12 @@ where
                     let node_pos = node.location() * meta.zoom + meta.pan;
                     let delta = mouse_pos - node_pos;
 
-                    self.move_node(n_idx_dragged, delta / meta.zoom);
+                    for id in self.g.selected_nodes().to_vec() {
+                        self.move_node(id, delta / meta.zoom);
+                    }
+                    if !self.g.selected_nodes().contains(&n_idx_dragged) {
+                        self.move_node(n_idx_dragged, delta / meta.zoom);
+                    }
                 }
             }
         }
@@ -551,6 +575,14 @@ where
     fn set_edge_clicked(&self, idx: EdgeIndex<Ix>) {
         #[cfg(feature = "events")]
         self.publish_event(Event::EdgeClick(PayloadEdgeClick { id: idx.index() }));
+    }
+
+    #[allow(unused_variables, clippy::unused_self)]
+    fn set_edge_double_clicked(&self, idx: EdgeIndex<Ix>) {
+        #[cfg(feature = "events")]
+        self.publish_event(Event::EdgeDoubleClick(PayloadEdgeDoubleClick {
+            id: idx.index(),
+        }));
     }
 
     fn select_edge(&mut self, idx: EdgeIndex<Ix>) {
