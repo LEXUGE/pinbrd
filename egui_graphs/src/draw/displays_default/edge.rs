@@ -212,12 +212,6 @@ impl<N: Clone, E: Clone, Ty: EdgeType, Ix: IndexType, D: DisplayNode<N, E, Ty, I
 
         res
     }
-
-    fn update(&mut self, state: &EdgeProps<E>) {
-        self.order = state.order;
-        self.selected = state.selected;
-        self.label_text = state.label.to_string();
-    }
 }
 
 impl DefaultEdgeShape {

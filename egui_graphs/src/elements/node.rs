@@ -50,9 +50,7 @@ where
     id: Option<NodeIndex<Ix>>,
 
     props: NodeProps<N>,
-    display: D,
-
-    _marker: PhantomData<(E, Ty)>,
+    _marker: PhantomData<(E, D, Ty)>,
 }
 
 #[allow(clippy::missing_fields_in_debug)] // TODO: add all fields or remove this and fix all warnings
@@ -82,7 +80,6 @@ where
         Self {
             id: Some(NodeIndex::new(idx)),
             props: self.props.clone(),
-            display: self.display.clone(),
             _marker: PhantomData,
         }
     }
@@ -113,10 +110,8 @@ where
 
     /// Creates a new node with custom properties
     pub fn new_with_props(props: NodeProps<N>) -> Self {
-        let display = D::from(props.clone());
         Self {
             props,
-            display,
 
             id: Option::default(),
             _marker: PhantomData,
@@ -127,12 +122,8 @@ where
         &self.props
     }
 
-    pub fn display(&self) -> &D {
-        &self.display
-    }
-
-    pub fn display_mut(&mut self) -> &mut D {
-        &mut self.display
+    pub fn display(&self) -> D {
+        D::from(self.props.clone())
     }
 
     #[allow(clippy::missing_panics_doc)] // TODO: Add panic message

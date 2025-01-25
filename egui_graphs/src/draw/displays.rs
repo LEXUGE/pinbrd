@@ -26,9 +26,6 @@ where
     /// Use `ctx.painter` to have low level access to egui painting process.
     fn shapes(&mut self, ctx: &DrawContext) -> Vec<Shape>;
 
-    /// Is called on every frame. Can be used for updating state of the implementation of [`DisplayNode`]
-    fn update(&mut self, state: &NodeProps<N>);
-
     /// Checks if the provided `pos` is inside the shape.
     ///
     /// * `pos` - position is in the canvas coordinates.
@@ -60,9 +57,6 @@ where
         end: &Node<N, E, Ty, Ix, D>,
         ctx: &DrawContext,
     ) -> Vec<Shape>;
-
-    /// Is called on every frame. Can be used for updating state of the implementation of [`DisplayNode`]
-    fn update(&mut self, state: &EdgeProps<E>);
 
     /// Checks if the provided `pos` is inside the shape.
     ///

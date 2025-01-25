@@ -92,11 +92,6 @@ impl<E: Clone, Ty: EdgeType, Ix: IndexType> DisplayNode<Blob, E, Ty, Ix> for MyN
         <DefaultNodeShape as DisplayNode<Blob, E, Ty, Ix>>::shapes(&mut self.super_shape, ctx)
     }
 
-    fn update(&mut self, state: &NodeProps<Blob>) {
-        <DefaultNodeShape as DisplayNode<Blob, E, Ty, Ix>>::update(&mut self.super_shape, state);
-        self.super_shape.color = state.payload.color();
-    }
-
     fn is_inside(&self, pos: egui::Pos2) -> bool {
         <DefaultNodeShape as DisplayNode<Blob, E, Ty, Ix>>::is_inside(&self.super_shape, pos)
     }
@@ -135,11 +130,6 @@ impl<N: Clone, Ty: EdgeType, Ix: IndexType, D: DisplayNode<N, Conn, Ty, Ix>>
         ctx: &DrawContext,
     ) -> Vec<egui::Shape> {
         self.super_shape.shapes(start, end, ctx)
-    }
-
-    fn update(&mut self, state: &EdgeProps<Conn>) {
-        <DefaultEdgeShape as DisplayEdge<N, Conn, Ty, Ix, D>>::update(&mut self.super_shape, state);
-        self.super_shape.color = state.payload.relation.color();
     }
 
     fn is_inside(

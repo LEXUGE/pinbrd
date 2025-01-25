@@ -29,10 +29,8 @@ pub struct Edge<
 > {
     id: Option<EdgeIndex<Ix>>,
 
-    display: D,
-
     props: EdgeProps<E>,
-    _marker: PhantomData<(N, Ty, Dn)>,
+    _marker: PhantomData<(N, Ty, Dn, D)>,
 }
 
 impl<
@@ -53,10 +51,8 @@ impl<
             label: String::default(),
         };
 
-        let display = D::from(props.clone());
         Self {
             props,
-            display,
 
             id: Option::default(),
             _marker: PhantomData,
@@ -67,12 +63,8 @@ impl<
         &self.props
     }
 
-    pub fn display(&self) -> &D {
-        &self.display
-    }
-
-    pub fn display_mut(&mut self) -> &mut D {
-        &mut self.display
+    pub fn display(&self) -> D {
+        D::from(self.props.clone())
     }
 
     #[allow(clippy::missing_panics_doc)] // TODO: Add panic message
