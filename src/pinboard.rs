@@ -1,5 +1,5 @@
 use crate::{
-    graph::{Blob, Conn, PinboardGraph, PinboardGraphView, Relation},
+    graph::{Blob, BlobType, Conn, PinboardGraph, PinboardGraphView, Relation},
     handle_promise,
 };
 use anyhow::{anyhow, Result};
@@ -10,7 +10,7 @@ use petgraph::{graph::NodeIndex, prelude::EdgeIndex, stable_graph::StableGraph};
 use poll_promise::Promise;
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 // A single pinboard
@@ -47,6 +47,11 @@ impl Default for Pinboard {
     }
 }
 
+enum Either {
+    Edge(EdgeIndex),
+    Node(NodeIndex),
+}
+
 // A single pinboard buffer, handles the opening etc
 pub struct PinboardBuffer {
     pub pinboard: Pinboard,
@@ -64,8 +69,8 @@ pub struct PinboardBuffer {
 
     // Promises
     save_file_promise: Option<Promise<Result<PathBuf>>>,
-    add_node_promise: Option<Promise<(Option<Pos2>, Result<PathBuf>)>>,
-    add_blob_to_edge_promise: Option<Promise<(EdgeIndex, Result<PathBuf>)>>,
+    update_blob_promise: Option<Promise<(Either, Result<Blob>)>>,
+    update_blob_and_open_promise: Option<Promise<(Either, Result<Blob>)>>,
 }
 
 impl Default for PinboardBuffer {
@@ -78,8 +83,8 @@ impl Default for PinboardBuffer {
             event_receiver,
             show_rename_modal: false,
             save_file_promise: None,
-            add_node_promise: None,
-            add_blob_to_edge_promise: None,
+            update_blob_promise: None,
+            update_blob_and_open_promise: None,
             unsaved: false,
         }
     }
@@ -96,6 +101,8 @@ impl PinboardBuffer {
     }
     async fn save_as(pinboard: Pinboard) -> anyhow::Result<PathBuf> {
         if let Some(path) = FileDialog::new()
+            // https://github.com/PolyMeilex/rfd/issues/235
+            .set_directory(Path::new(".").canonicalize()?)
             .add_filter("Pinboard", &["pinbrd"])
             .save_file()
         {
@@ -143,34 +150,85 @@ impl PinboardBuffer {
         }
     }
 
-    fn handle_events(&mut self) -> Option<Blob> {
-        let mut res = None;
+    fn handle_events(&mut self) {
         for e in self.event_receiver.try_iter() {
             match e {
                 Event::EdgeDoubleClick(payload) => {
+                    let root = giro::git_root(self.path.as_ref().unwrap())
+                        .unwrap_or(None)
+                        .unwrap_or(Path::new(".").to_path_buf());
                     let edge_id = EdgeIndex::new(payload.id);
 
-                    res = self
+                    if let Some(mut blob) = self
                         .pinboard
                         .graph
                         .edge(edge_id)
                         .map(|e| e.payload().comment.clone())
-                        .flatten();
+                        .flatten()
+                    {
+                        self.update_blob_and_open_promise =
+                            Some(Promise::spawn_blocking(move || -> _ {
+                                match blob.update(&root) {
+                                    Ok(()) => (Either::Edge(edge_id), Ok(blob)),
+                                    Err(e) => (Either::Edge(edge_id), Err(e)),
+                                }
+                            }));
+                        return;
+                    }
                 }
                 Event::NodeDoubleClick(payload) => {
+                    let root = giro::git_root(self.path.as_ref().unwrap())
+                        .unwrap_or(None)
+                        .unwrap_or(Path::new(".").to_path_buf());
                     let node_id = NodeIndex::new(payload.id);
 
-                    res = self
+                    if let Some(mut blob) = self
                         .pinboard
                         .graph
                         .node(node_id)
-                        .map(|n| n.payload().clone());
+                        .map(|n| n.payload().clone())
+                        .flatten()
+                    {
+                        self.update_blob_and_open_promise =
+                            Some(Promise::spawn_blocking(move || -> _ {
+                                match blob.update(&root) {
+                                    Ok(()) => (Either::Node(node_id), Ok(blob)),
+                                    Err(e) => (Either::Node(node_id), Err(e)),
+                                }
+                            }));
+                        return;
+                    }
                 }
                 Event::NodeMove(_) => self.unsaved = true,
                 _ => {}
             }
         }
-        res
+    }
+
+    async fn add_blob() -> Result<Blob> {
+        let path = FileDialog::new()
+            // https://github.com/PolyMeilex/rfd/issues/235
+            .set_directory(Path::new(".").canonicalize()?)
+            .pick_file()
+            .ok_or(anyhow!("user didn't select file"))?;
+
+        match path.extension().map(|s| s.to_str()).flatten() {
+            Some("pinbrd") => Blob::new(BlobType::PinboardGraph, path.to_path_buf()).await,
+            _ => Blob::new(BlobType::File, path.to_path_buf()).await,
+        }
+    }
+
+    fn add_node(&mut self, pos: Option<Pos2>, metadata: &Metadata) {
+        let id = if let Some(pos) = pos {
+            self.pinboard
+                .graph
+                .add_node_with_location(None, metadata.screen_to_canvas_pos(pos))
+        } else {
+            self.pinboard.graph.add_node(None)
+        };
+        self.update_blob_promise = Some(Promise::spawn_async(async move {
+            (Either::Node(id), Self::add_blob().await)
+        }));
     }
 
     // Display the UI and optionally return the Blob to preview
@@ -241,6 +299,12 @@ impl PinboardBuffer {
                         .with_events(&self.event_publisher),
                 );
 
+                // Technically you could also directly use context.data_mut, but we wouldn't bother
+                // to write it like that.
+                // NOTE: It's important to make sure metadata is updated before we process cursor
+                // information
+                metadata = Metadata::load(ui, id);
+
                 if resp.hovered() {
                     // Process keyboard shortcuts
                     if ui.input_mut(|i| i.consume_shortcut(&save_shortcut)) {
@@ -251,14 +315,7 @@ impl PinboardBuffer {
                     }
                     if ui.input_mut(|i| i.consume_shortcut(&add_node_shortcut)) {
                         let pos = ui.input(|i| i.pointer.hover_pos());
-                        self.add_node_promise = Some(Promise::spawn_async(async move {
-                            (
-                                pos,
-                                FileDialog::new()
-                                    .pick_file()
-                                    .ok_or(anyhow!("user didn't select file to add node")),
-                            )
-                        }));
+                        self.add_node(pos, &metadata);
                     }
                 }
 
@@ -269,14 +326,7 @@ impl PinboardBuffer {
                     // TODO: These should spun up a property sidepanel and ask user to put their
                     // stuff there
                     if ui.button("Add node").clicked() {
-                        self.add_node_promise = Some(Promise::spawn_async(async move {
-                            (
-                                pos,
-                                FileDialog::new()
-                                    .pick_file()
-                                    .ok_or(anyhow!("user didn't select file to add node")),
-                            )
-                        }));
+                        self.add_node(pos, &metadata);
                         ui.close_menu();
                     }
 
@@ -341,15 +391,9 @@ impl PinboardBuffer {
                     if self.pinboard.graph.selected_edges().len() == 1 {
                         let id = self.pinboard.graph.selected_edges()[0];
                         if ui.button("Add to the Edge").clicked() {
-                            self.add_blob_to_edge_promise =
-                                Some(Promise::spawn_async(async move {
-                                    (
-                                        id,
-                                        FileDialog::new().pick_file().ok_or(anyhow!(
-                                            "user didn't select file to add to edge"
-                                        )),
-                                    )
-                                }));
+                            self.update_blob_promise = Some(Promise::spawn_async(async move {
+                                (Either::Edge(id), Self::add_blob().await)
+                            }));
                             ui.close_menu();
                         }
 
@@ -396,12 +440,10 @@ impl PinboardBuffer {
                     }
                 });
 
-                // Technically you could also directly use context.data_mut, but we wouldn't bother
-                // to write it like that.
-                metadata = Metadata::load(ui, id);
-
                 self.show_rename_dialog(ui);
             });
+
+        self.handle_events();
 
         // Handle Promises
         handle_promise(&mut self.save_file_promise, |r| match r {
@@ -414,41 +456,70 @@ impl PinboardBuffer {
             }
         });
 
-        handle_promise(&mut self.add_node_promise, |(press_pos, p)| match p {
-            Ok(path) => {
-                let filename = path.file_name().unwrap().to_str().unwrap().to_string();
-                let blob = match path.extension().map(|s| s.to_str()).flatten() {
-                    Some("pinbrd") => Blob::PinboardGraph(path.to_path_buf()),
-                    _ => Blob::File(path.to_path_buf()),
-                };
-                if let Some(pos) = press_pos {
-                    self.pinboard.graph.add_node_with_label_and_location(
+        handle_promise(&mut self.update_blob_promise, |(either, b)| match b {
+            Ok(blob) => {
+                Self::handle_update_blob_to_node(
+                    &mut self.unsaved,
+                    &mut self.pinboard.graph,
+                    either,
+                    blob,
+                );
+            }
+            Err(e) => {
+                eprintln!("cannot open blob: {}", e);
+            }
+        });
+
+        handle_promise(
+            &mut self.update_blob_and_open_promise,
+            |(either, b)| match b {
+                Ok(blob) => {
+                    Self::handle_update_blob_to_node(
+                        &mut self.unsaved,
+                        &mut self.pinboard.graph,
+                        either,
                         blob,
-                        filename,
-                        metadata.screen_to_canvas_pos(*pos),
                     );
-                } else {
-                    self.pinboard.graph.add_node_with_label(blob, filename);
+                    Some(blob.clone())
                 }
-                self.unsaved = true;
-            }
-            Err(e) => eprintln!("{}", e),
-        });
-
-        handle_promise(&mut self.add_blob_to_edge_promise, |(id, p)| match p {
-            Ok(path) => {
-                let blob = match path.extension().map(|s| s.to_str()).flatten() {
-                    Some("pinbrd") => Blob::PinboardGraph(path.to_path_buf()),
-                    _ => Blob::File(path.to_path_buf()),
-                };
-                if let Some(edge) = self.pinboard.graph.edge_mut(*id) {
-                    edge.payload_mut().comment = Some(blob);
-                    self.unsaved = true;
+                Err(e) => {
+                    eprintln!("cannot open blob: {}", e);
+                    None
                 }
-            }
-            Err(e) => eprintln!("{}", e),
-        });
+            },
+        )
+        .flatten()
+    }
 
-        self.handle_events()
+    // Borrow checker is too dumb to infer across function call that we are mutably borrowing
+    // different part of a struct
+    fn handle_update_blob_to_node(
+        unsaved: &mut bool,
+        graph: &mut PinboardGraph,
+        either: &Either,
+        blob: &Blob,
+    ) {
+        let filename = blob
+            .path()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        match either {
+            Either::Edge(id) => {
+                graph.edge_mut(*id).map(|e| {
+                    e.payload_mut().comment = Some(blob.clone());
+                    e.set_label(filename);
+                });
+            }
+            Either::Node(id) => {
+                graph.node_mut(*id).map(|n| {
+                    *n.payload_mut() = Some(blob.clone());
+                    n.set_label(filename);
+                });
+            }
+        };
+        *unsaved = true;
     }
 }

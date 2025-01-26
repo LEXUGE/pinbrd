@@ -2,12 +2,15 @@ use anyhow::anyhow;
 use clap::Parser;
 use eframe::{run_native, App, CreationContext, NativeOptions};
 use egui::{Context, TopBottomPanel};
-use graph::{Blob, PinboardGraph};
+use graph::{BlobType, PinboardGraph};
 use petgraph::stable_graph::StableGraph;
 use pinboard::*;
 use poll_promise::Promise;
 use rfd::FileDialog;
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 use uuid::Uuid;
 
 mod graph;
@@ -53,6 +56,8 @@ impl PinlabApp {
 
     async fn open_pinboard() -> anyhow::Result<PinboardBuffer> {
         if let Some(path) = FileDialog::new()
+            // https://github.com/PolyMeilex/rfd/issues/235
+            .set_directory(Path::new(".").canonicalize()?)
             .add_filter("Pinboard", &["pinbrd"])
             .pick_file()
         {
@@ -97,17 +102,15 @@ fn handle_promise<T: Send + 'static, R>(
 ) -> Option<R> {
     // workaround to the borrow checker
     let mut flag = false;
-    let res = if let Some(promise) = p {
-        match promise.ready() {
-            Some(t) => {
+    let res = p
+        .as_ref()
+        .map(|promise| {
+            promise.ready().map(|t| {
                 flag = true;
-                Some(f(t))
-            }
-            None => None,
-        }
-    } else {
-        None
-    };
+                f(t)
+            })
+        })
+        .flatten();
     if flag {
         *p = None;
     }
@@ -123,12 +126,12 @@ impl App for PinlabApp {
                 async fn _h(path: PathBuf) -> anyhow::Result<PinboardBuffer> {
                     PinlabApp::open_pinboard_from_path(&path).await
                 }
-                match b {
-                    Blob::File(path) => {
+                match b.ty() {
+                    BlobType::File => {
                         match if let Some(srv) = &self.nvim_srv {
                             // If matches any of the extension we want to launch in neovim
                             if Some(true)
-                                == path
+                                == b.path()
                                     .extension()
                                     .map(|s| s.to_str())
                                     .flatten()
@@ -138,24 +141,24 @@ impl App for PinlabApp {
                                     .arg("--server")
                                     .arg(srv)
                                     .arg("--remote")
-                                    .arg(path)
+                                    .arg(b.path())
                                     .spawn()
                                     .map(|_| ())
                             } else {
                                 // if not matched, open in default as well
-                                open::that(path)
+                                open::that(b.path())
                             }
                         } else {
-                            open::that(path)
+                            open::that(b.path())
                         } {
                             // print out error if any
                             Err(e) => eprintln!("{}", e),
                             _ => {}
                         }
                     }
-                    Blob::PinboardGraph(path) => self
+                    BlobType::PinboardGraph => self
                         .boards_to_open
-                        .push(Some(Promise::spawn_async(_h(path)))),
+                        .push(Some(Promise::spawn_async(_h(b.path().to_path_buf())))),
                 }
             }
         }

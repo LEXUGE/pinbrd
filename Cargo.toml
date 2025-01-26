@@ -33,3 +33,6 @@ egui_extras = "0.30"
 tokio-shutdown = "0.1"
 clap = { version = "4.5", features = ["derive"] }
 poll-promise = { version = "0.3", features = ["tokio"] }
+giro = "0.1"
+blake3 = { version = "1.5", features = ["serde"] }
+hf = "0.3"
