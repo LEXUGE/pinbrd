@@ -47,6 +47,9 @@
                       libGL
                       libxkbcommon
                       wayland
+                      xorg.libXcursor
+                      xorg.libXi
+                      xorg.libX11
                     ]
                   }
               '';
@@ -115,8 +118,6 @@
           };
       })
     // {
-      overlays.default = final: prev: {
-        pinlab = recurseIntoAttrs (pkgSet prev.pkgs.system);
-      };
+      overlays.default = final: prev: (pkgSet prev.pkgs.system);
     };
 }
