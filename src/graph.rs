@@ -7,6 +7,7 @@ use egui_graphs::{
     DefaultEdgeShape, DefaultNodeShape, DisplayEdge, DisplayNode, DrawContext, EdgeProps, Graph,
     GraphView, Node, NodeProps,
 };
+use log::{info, warn};
 use petgraph::{
     csr::{DefaultIx, IndexType},
     EdgeType, Undirected,
@@ -48,6 +49,7 @@ impl Blob {
         let mut count = 0;
         let mut res = None;
         if dir.is_dir() {
+            info!("searching inside {:?}", dir);
             // Count number of files matching our hash
             for entry in std::fs::read_dir(dir)? {
                 let entry = entry?;
@@ -57,11 +59,13 @@ impl Blob {
                 if !hf::is_hidden(&path).unwrap_or(true) {
                     if path.is_dir() {
                         if let Some(matched) = Self::walk(&path, hash)? {
+                            info!("path {:?} matches the hash {}", path, hash);
                             res = Some(matched);
                             count += 1;
                         }
                     } else {
                         if blake3::hash(&std::fs::read(&path)?) == *hash {
+                            info!("path {:?} matches the hash {}", path, hash);
                             res = Some(path);
                             count += 1;
                         }
@@ -93,12 +97,19 @@ impl Blob {
                 self.hash = blake3::hash(&std::fs::read(&self.path)?);
             }
             Ok(false) => {
+                warn!(
+                    "{:?} doesn't exist, trying to automatically match file under {:?}",
+                    self.path, root
+                );
                 // File doesn't exist or is not accessible, search from the path
                 if let Some(path) = Self::walk(root, &self.hash)? {
                     self.path = path;
+                } else {
+                    warn!("{:?} doesn't exist and cannot be matched to any unique, unhidden file under {:?}", self.path, root);
                 }
             }
-            Err(_) => {
+            Err(e) => {
+                warn!("checking path {:?} availability failed: {}", self.path, e);
                 // Do nothing because it might be that we just have no permission to list the file
                 // or something
             }

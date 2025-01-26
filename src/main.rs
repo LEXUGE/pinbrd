@@ -3,9 +3,11 @@ use clap::Parser;
 use eframe::{run_native, App, CreationContext, NativeOptions};
 use egui::{Context, TopBottomPanel};
 use graph::{BlobType, PinboardGraph};
+use log::error;
 use petgraph::stable_graph::StableGraph;
 use pinboard::*;
 use poll_promise::Promise;
+use pretty_env_logger::env_logger::Env;
 use rfd::FileDialog;
 use std::{
     collections::HashMap,
@@ -152,7 +154,7 @@ impl App for PinlabApp {
                             open::that(b.path())
                         } {
                             // print out error if any
-                            Err(e) => eprintln!("{}", e),
+                            Err(e) => error!("cannot open file: {}", e),
                             _ => {}
                         }
                     }
@@ -171,7 +173,7 @@ impl App for PinlabApp {
                 match promise.ready() {
                     Some(Ok(_)) => indices_to_remove.push(i),
                     Some(Err(e)) => {
-                        eprintln!("{}", e);
+                        error!("failed to open pinboard: {}", e);
                         *p = None;
                     }
                     None => {}
@@ -217,6 +219,8 @@ struct Args {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
+    pretty_env_logger::env_logger::Builder::from_env(Env::default().default_filter_or("info"))
+        .init();
 
     run_native(
         "Pinlab",

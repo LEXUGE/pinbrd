@@ -6,6 +6,7 @@ use anyhow::{anyhow, Result};
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use egui::{Button, Context, Id, Key, KeyboardShortcut, Modal, Modifiers, Pos2, Ui, Window};
 use egui_graphs::{events::Event, Metadata, SettingsInteraction, SettingsNavigation};
+use log::error;
 use petgraph::{graph::NodeIndex, prelude::EdgeIndex, stable_graph::StableGraph};
 use poll_promise::Promise;
 use rfd::FileDialog;
@@ -150,13 +151,18 @@ impl PinboardBuffer {
         }
     }
 
+    // Get project root for the pinboard
+    fn get_root(&self) -> PathBuf {
+        giro::git_root(self.path.as_ref().unwrap())
+            .unwrap_or(None)
+            .unwrap_or(Path::new(".").to_path_buf())
+    }
+
     fn handle_events(&mut self) {
         for e in self.event_receiver.try_iter() {
             match e {
                 Event::EdgeDoubleClick(payload) => {
-                    let root = giro::git_root(self.path.as_ref().unwrap())
-                        .unwrap_or(None)
-                        .unwrap_or(Path::new(".").to_path_buf());
+                    let root = self.get_root();
                     let edge_id = EdgeIndex::new(payload.id);
 
                     if let Some(mut blob) = self
@@ -177,9 +183,7 @@ impl PinboardBuffer {
                     }
                 }
                 Event::NodeDoubleClick(payload) => {
-                    let root = giro::git_root(self.path.as_ref().unwrap())
-                        .unwrap_or(None)
-                        .unwrap_or(Path::new(".").to_path_buf());
+                    let root = self.get_root();
                     let node_id = NodeIndex::new(payload.id);
 
                     if let Some(mut blob) = self
@@ -205,10 +209,10 @@ impl PinboardBuffer {
         }
     }
 
-    async fn add_blob() -> Result<Blob> {
+    async fn add_blob(root: PathBuf) -> Result<Blob> {
         let path = FileDialog::new()
             // https://github.com/PolyMeilex/rfd/issues/235
-            .set_directory(Path::new(".").canonicalize()?)
+            .set_directory(root.canonicalize()?)
             .pick_file()
             .ok_or(anyhow!("user didn't select file"))?;
 
@@ -226,8 +230,9 @@ impl PinboardBuffer {
         } else {
             self.pinboard.graph.add_node(None)
         };
+        let root = self.get_root();
         self.update_blob_promise = Some(Promise::spawn_async(async move {
-            (Either::Node(id), Self::add_blob().await)
+            (Either::Node(id), Self::add_blob(root).await)
         }));
     }
 
@@ -330,9 +335,20 @@ impl PinboardBuffer {
                         ui.close_menu();
                     }
 
+                    if self.pinboard.graph.selected_nodes().len() == 1 {
+                        ui.separator();
+                        if ui.button("Update node").clicked() {
+                            let id = self.pinboard.graph.selected_nodes()[0].clone();
+                            let root = self.get_root();
+                            self.update_blob_promise = Some(Promise::spawn_async(async move {
+                                (Either::Node(id), Self::add_blob(root).await)
+                            }));
+                            ui.close_menu();
+                        }
+                    }
+
                     // Display context menu based on what we have selected
                     if self.pinboard.graph.selected_nodes().len() > 0 {
-                        ui.separator();
                         if ui.button("Delete selected node(s)").clicked() {
                             for n in Vec::from(self.pinboard.graph.selected_nodes()) {
                                 self.pinboard.graph.remove_node(n);
@@ -391,8 +407,9 @@ impl PinboardBuffer {
                     if self.pinboard.graph.selected_edges().len() == 1 {
                         let id = self.pinboard.graph.selected_edges()[0];
                         if ui.button("Add to the Edge").clicked() {
+                            let root = self.get_root();
                             self.update_blob_promise = Some(Promise::spawn_async(async move {
-                                (Either::Edge(id), Self::add_blob().await)
+                                (Either::Edge(id), Self::add_blob(root).await)
                             }));
                             ui.close_menu();
                         }
@@ -452,7 +469,7 @@ impl PinboardBuffer {
                 self.unsaved = false;
             }
             Err(e) => {
-                eprintln!("{}", e);
+                error!("cannot save pinboard: {}", e);
             }
         });
 
@@ -466,7 +483,7 @@ impl PinboardBuffer {
                 );
             }
             Err(e) => {
-                eprintln!("cannot open blob: {}", e);
+                error!("cannot open blob: {}", e);
             }
         });
 
@@ -483,7 +500,7 @@ impl PinboardBuffer {
                     Some(blob.clone())
                 }
                 Err(e) => {
-                    eprintln!("cannot open blob: {}", e);
+                    error!("cannot update blob: {}", e);
                     None
                 }
             },
