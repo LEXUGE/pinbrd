@@ -17,13 +17,13 @@ use std::path::{Path, PathBuf};
 
 /// A blob is any document (e.g. PDF, image, hyperlink, etc. or even a pinboard!)
 // NOTE: Cloning an trait object is impossible, that's why we didn't implement in that style
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(PartialEq, Serialize, Deserialize, Clone)]
 pub enum BlobType {
     PinboardGraph,
     File,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(PartialEq, Serialize, Deserialize, Clone)]
 pub struct Blob {
     ty: BlobType,
     path: PathBuf,
@@ -43,6 +43,11 @@ impl Blob {
 
     pub fn ty(&self) -> &BlobType {
         &self.ty
+    }
+
+    #[allow(dead_code)]
+    pub fn hash(&self) -> &BlakeHash {
+        &self.hash
     }
 
     fn walk(dir: &Path, hash: &BlakeHash) -> anyhow::Result<Option<PathBuf>> {

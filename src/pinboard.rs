@@ -236,6 +236,32 @@ impl PinboardBuffer {
         }));
     }
 
+    fn show_relation_submenu(ui: &mut Ui) -> (bool, Relation) {
+        let mut relation = Relation::Related;
+        let mut clicked = false;
+        if ui.button("Related").clicked() {
+            relation = Relation::Related;
+            clicked = true;
+            ui.close_menu();
+        }
+        if ui.button("Insight").clicked() {
+            relation = Relation::Insight;
+            clicked = true;
+            ui.close_menu();
+        }
+        if ui.button("Progress").clicked() {
+            relation = Relation::Progress;
+            clicked = true;
+            ui.close_menu();
+        }
+        if ui.button("Conflict").clicked() {
+            relation = Relation::Conflict;
+            clicked = true;
+            ui.close_menu();
+        }
+        return (clicked, relation);
+    }
+
     // Display the UI and optionally return the Blob to preview
     pub fn show(&mut self, ctx: &Context, open: &mut bool) -> Option<Blob> {
         let mut metadata = Metadata::default();
@@ -365,28 +391,7 @@ impl PinboardBuffer {
                         if self.pinboard.graph.g().find_edge(a, b).is_none() {
                             ui.menu_button("Connect with", |ui| {
                                 let selected = Vec::from(self.pinboard.graph.selected_nodes());
-                                let mut relation = Relation::Related;
-                                let mut clicked = false;
-                                if ui.button("Related").clicked() {
-                                    relation = Relation::Related;
-                                    clicked = true;
-                                    ui.close_menu();
-                                }
-                                if ui.button("Insight").clicked() {
-                                    relation = Relation::Insight;
-                                    clicked = true;
-                                    ui.close_menu();
-                                }
-                                if ui.button("Progress").clicked() {
-                                    relation = Relation::Progress;
-                                    clicked = true;
-                                    ui.close_menu();
-                                }
-                                if ui.button("Conflict").clicked() {
-                                    relation = Relation::Conflict;
-                                    clicked = true;
-                                    ui.close_menu();
-                                }
+                                let (clicked, relation) = Self::show_relation_submenu(ui);
                                 if clicked {
                                     let label = relation.label();
                                     self.pinboard.graph.add_edge_with_label(
@@ -415,28 +420,7 @@ impl PinboardBuffer {
                         }
 
                         ui.menu_button("Change Relation", |ui| {
-                            let mut relation = Relation::Related;
-                            let mut clicked = false;
-                            if ui.button("Related").clicked() {
-                                relation = Relation::Related;
-                                clicked = true;
-                                ui.close_menu();
-                            }
-                            if ui.button("Insight").clicked() {
-                                relation = Relation::Insight;
-                                clicked = true;
-                                ui.close_menu();
-                            }
-                            if ui.button("Progress").clicked() {
-                                relation = Relation::Progress;
-                                clicked = true;
-                                ui.close_menu();
-                            }
-                            if ui.button("Conflict").clicked() {
-                                relation = Relation::Conflict;
-                                clicked = true;
-                                ui.close_menu();
-                            }
+                            let (clicked, relation) = Self::show_relation_submenu(ui);
                             if clicked {
                                 let edge = self.pinboard.graph.edge_mut(id).unwrap();
                                 edge.set_label(relation.label());
@@ -526,17 +510,22 @@ impl PinboardBuffer {
         match either {
             Either::Edge(id) => {
                 graph.edge_mut(*id).map(|e| {
+                    if let Some(b) = &e.payload().comment {
+                        *unsaved = *unsaved || (b != blob);
+                    }
                     e.payload_mut().comment = Some(blob.clone());
                     e.set_label(filename);
                 });
             }
             Either::Node(id) => {
                 graph.node_mut(*id).map(|n| {
+                    if let Some(b) = &n.payload() {
+                        *unsaved = *unsaved || (b != blob);
+                    }
                     *n.payload_mut() = Some(blob.clone());
                     n.set_label(filename);
                 });
             }
         };
-        *unsaved = true;
     }
 }
