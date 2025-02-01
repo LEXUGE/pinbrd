@@ -39,7 +39,7 @@ impl PinlabApp {
             nvim_srv: args.nvim_srv,
             nvim_ext: args
                 .nvim_ext
-                .unwrap_or(vec!["md".into(), "markdown".into()]),
+                .unwrap_or(vec!["md".into(), "markdown".into(), "typ".into()]),
         }
     }
 
